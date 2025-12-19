@@ -58,16 +58,18 @@ func Start(addr string) {
 	fmt.Println("Chat server started on", addr)
 
 	server := NewServer()
-	go server.Run()
+	go server.Run()  
 
 	for {
-		conn, err := listener.Accept()
+		conn, err := listener.Accept()  
 		if err != nil {
 			continue
 		}
-		client := NewClient(conn, server)
-		server.register <- client
-		go client.Read()
-		go client.Write()
+
+		client := NewClient(conn, server)   
+		server.register <- client          
+		go client.Read()                    
+		go client.Write()                   
 	}
 }
+
