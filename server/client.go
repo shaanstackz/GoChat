@@ -12,39 +12,50 @@ type Client struct {
 	server   *Server
 	send     chan string
 	username string
+	room     string
 }
 
 func NewClient(conn net.Conn, server *Server) *Client {
 	return &Client{
 		conn:   conn,
 		server: server,
-		send:   make(chan string, 10), 
+		send:   make(chan string, 10),
 	}
 }
 
 func (c *Client) Read() {
 	defer func() {
-		c.server.broadcast <- fmt.Sprintf("🔴 %s left the chat", c.username)
+		c.server.BroadcastToRoom(c.room, fmt.Sprintf("🔴 %s left the room", c.username))
 		c.server.unregister <- c
 		c.conn.Close()
 	}()
 
 	scanner := bufio.NewScanner(c.conn)
-
 	fmt.Fprintln(c.conn, "Enter username:")
 	if !scanner.Scan() {
 		return
 	}
 	c.username = scanner.Text()
-
-	c.server.broadcast <- fmt.Sprintf("🔵 %s joined the chat", c.username)
+	c.room = "lobby"
+	c.server.MoveClientToRoom(c, "lobby")
+	if messages, ok := c.server.history["lobby"]; ok {
+		for _, msg := range messages {
+			c.send <- msg
+		}
+	}
+	c.send <- "You joined room lobby"
+	c.server.BroadcastToRoom("lobby", fmt.Sprintf("🔵 %s joined the room", c.username))
 
 	for scanner.Scan() {
 		msg := scanner.Text()
 
 		if msg == "/users" {
-			userList := c.server.ListUsers()
-			c.send <- "Connected users: " + userList
+			c.send <- "Connected users: " + c.server.ListUsers()
+			continue
+		}
+
+		if msg == "/rooms" {
+			c.send <- "Active rooms: " + c.server.ListRooms()
 			continue
 		}
 
@@ -70,13 +81,32 @@ func (c *Client) Read() {
 			}
 			oldName := c.username
 			c.username = newName
-			c.server.broadcast <- fmt.Sprintf("🔄 %s changed name to %s", oldName, newName)
+			c.server.BroadcastToRoom(c.room, fmt.Sprintf("🔄 %s changed name to %s", oldName, newName))
+			continue
+		}
+
+		if strings.HasPrefix(msg, "/join ") {
+			newRoom := strings.TrimSpace(strings.TrimPrefix(msg, "/join "))
+			if newRoom == "" {
+				c.send <- "Usage: /join roomname"
+				continue
+			}
+			oldRoom := c.room
+			c.server.MoveClientToRoom(c, newRoom)
+			c.room = newRoom
+			if messages, ok := c.server.history[newRoom]; ok {
+				for _, m := range messages {
+					c.send <- m
+				}
+			}
+			c.send <- fmt.Sprintf("You joined room %s", newRoom)
+			c.server.BroadcastToRoom(oldRoom, fmt.Sprintf("🔴 %s left the room", c.username))
+			c.server.BroadcastToRoom(newRoom, fmt.Sprintf("🔵 %s joined the room", c.username))
 			continue
 		}
 
 		formatted := fmt.Sprintf("[%s] %s", c.username, msg)
-		fmt.Println("READ:", formatted)      
-		c.server.broadcast <- formatted
+		c.server.BroadcastToRoom(c.room, formatted)
 	}
 }
 
