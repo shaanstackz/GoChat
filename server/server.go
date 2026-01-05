@@ -3,142 +3,152 @@ package server
 import (
 	"fmt"
 	"net"
+	"strings"
+	"time"
 )
 
-type Server struct {
-	clients    map[*Client]bool
-	rooms      map[string]map[*Client]bool
-	history    map[string][]string
-	broadcast  chan string
-	register   chan *Client
-	unregister chan *Client
+type Message struct {
+	ID      int
+	Sender  string
+	Content string
+	Time    string
 }
 
+type Server struct {
+	clients map[*Client]bool
+	rooms   map[string]map[*Client]bool
+	history map[string][]Message
+	nextID  int
+}
 
 func NewServer() *Server {
 	return &Server{
-		clients:    make(map[*Client]bool),
-		rooms:      make(map[string]map[*Client]bool),
-		history:    make(map[string][]string),
-		broadcast:  make(chan string),
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
+		clients: make(map[*Client]bool),
+		rooms:   make(map[string]map[*Client]bool),
+		history: make(map[string][]Message),
+		nextID:  1,
 	}
 }
 
+func (s *Server) AddClient(c *Client, room string) {
+	s.clients[c] = true
+	if s.rooms[room] == nil {
+		s.rooms[room] = make(map[*Client]bool)
+	}
+	s.rooms[room][c] = true
+	c.send <- "Joined room " + room
+	for _, m := range s.history[room] {
+		c.send <- fmt.Sprintf("[%d] [%s] [%s] %s", m.ID, m.Time, m.Sender, m.Content)
+	}
+	s.BroadcastSystem(room, c.username+" joined")
+}
 
-func (s *Server) Run() {
-	for {
-		select {
-		case client := <-s.register:
-			s.clients[client] = true
+func (s *Server) RemoveClient(c *Client) {
+	delete(s.clients, c)
+	if s.rooms[c.room] != nil {
+		delete(s.rooms[c.room], c)
+		s.BroadcastSystem(c.room, c.username+" left")
+	}
+	close(c.send)
+}
 
-		case client := <-s.unregister:
-			if _, ok := s.clients[client]; ok {
-				delete(s.clients, client)
-				close(client.send)
-				if oldClients, ok := s.rooms[client.room]; ok {
-					delete(oldClients, client)
-				}
-			}
+func (s *Server) MoveClient(c *Client, room string) {
+	if s.rooms[c.room] != nil {
+		delete(s.rooms[c.room], c)
+	}
+	c.room = room
+	s.AddClient(c, room)
+}
 
-		case message := <-s.broadcast:
-			for client := range s.clients {
-				select {
-				case client.send <- message:
-				default:
-					close(client.send)
-					delete(s.clients, client)
-					if oldClients, ok := s.rooms[client.room]; ok {
-						delete(oldClients, client)
-					}
-				}
-			}
+func (s *Server) Broadcast(c *Client, content string) {
+	msg := Message{
+		ID:      s.nextID,
+		Sender:  c.username,
+		Content: content,
+		Time:    time.Now().Format("15:04"),
+	}
+	s.nextID++
+	s.history[c.room] = append(s.history[c.room], msg)
+
+	formatted := fmt.Sprintf("[%d] [%s] [%s] %s", msg.ID, msg.Time, msg.Sender, msg.Content)
+	for client := range s.rooms[c.room] {
+		client.send <- formatted
+		if strings.Contains(content, "@"+client.username) {
+			client.send <- "[MENTION] " + c.username + " mentioned you"
+		}
+	}
+}
+
+func (s *Server) BroadcastSystem(room, msg string) {
+	for client := range s.rooms[room] {
+		client.send <- "[SYSTEM] " + msg
+	}
+}
+
+func (s *Server) PrivateMessage(from, to, msg string) {
+	for client := range s.clients {
+		if client.username == to {
+			client.send <- "[PM from " + from + "] " + msg
+			return
 		}
 	}
 }
 
 func (s *Server) ListUsers() string {
-	users := ""
-	for client := range s.clients {
-		users += client.username + ", "
+	var users []string
+	for c := range s.clients {
+		users = append(users, c.username)
 	}
-	if len(users) > 2 {
-		users = users[:len(users)-2]
-	}
-	return users
+	return "Users: " + strings.Join(users, ", ")
 }
 
 func (s *Server) ListRooms() string {
-	names := ""
-	for name := range s.rooms {
-		names += name + ", "
+	var rooms []string
+	for r := range s.rooms {
+		rooms = append(rooms, r)
 	}
-	if len(names) > 2 {
-		names = names[:len(names)-2]
-	}
-	return names
+	return "Rooms: " + strings.Join(rooms, ", ")
 }
 
-func (s *Server) SendPrivate(username, msg string) bool {
-	for client := range s.clients {
-		if client.username == username {
-			client.send <- msg
-			return true
+func (s *Server) Search(room, keyword string) []string {
+	var results []string
+	for _, m := range s.history[room] {
+		if strings.Contains(m.Content, keyword) {
+			results = append(results,
+				fmt.Sprintf("[%d] [%s] [%s] %s", m.ID, m.Time, m.Sender, m.Content))
 		}
 	}
-	return false
+	return results
 }
 
-func (s *Server) MoveClientToRoom(c *Client, room string) {
-	if oldClients, ok := s.rooms[c.room]; ok {
-		delete(oldClients, c)
-	}
-	if s.rooms[room] == nil {
-		s.rooms[room] = make(map[*Client]bool)
-	}
-	s.rooms[room][c] = true
-}
-
-func (s *Server) BroadcastToRoom(room, msg string) {
-	if s.history[room] == nil {
-		s.history[room] = []string{}
-	}
-	s.history[room] = append(s.history[room], msg)
-	if len(s.history[room]) > 50 { // keep last 50 messages
-		s.history[room] = s.history[room][len(s.history[room])-50:]
-	}
-	for client := range s.rooms[room] {
-		select {
-		case client.send <- msg:
-		default:
-			close(client.send)
-			delete(s.clients, client)
-			delete(s.rooms[room], client)
+func (s *Server) EditMessage(c *Client, id int, text string) {
+	for i, m := range s.history[c.room] {
+		if m.ID == id && m.Sender == c.username {
+			s.history[c.room][i].Content = text
+			s.BroadcastSystem(c.room, "message edited")
+			return
 		}
 	}
 }
 
+func (s *Server) DeleteMessage(c *Client, id int) {
+	for i, m := range s.history[c.room] {
+		if m.ID == id && m.Sender == c.username {
+			s.history[c.room] = append(s.history[c.room][:i], s.history[c.room][i+1:]...)
+			s.BroadcastSystem(c.room, "message deleted")
+			return
+		}
+	}
+}
 
 func Start(addr string) {
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		panic(err)
-	}
-	defer listener.Close()
-
-	fmt.Println("Chat server started on", addr)
-
+	ln, _ := net.Listen("tcp", addr)
+	fmt.Println("Server on", addr)
 	server := NewServer()
-	go server.Run()
 
 	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			continue
-		}
+		conn, _ := ln.Accept()
 		client := NewClient(conn, server)
-		server.register <- client
 		go client.Write()
 		go client.Read()
 	}

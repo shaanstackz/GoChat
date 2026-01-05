@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 )
 
@@ -25,8 +26,7 @@ func NewClient(conn net.Conn, server *Server) *Client {
 
 func (c *Client) Read() {
 	defer func() {
-		c.server.BroadcastToRoom(c.room, fmt.Sprintf("🔴 %s left the room", c.username))
-		c.server.unregister <- c
+		c.server.RemoveClient(c)
 		c.conn.Close()
 	}()
 
@@ -37,76 +37,62 @@ func (c *Client) Read() {
 	}
 	c.username = scanner.Text()
 	c.room = "lobby"
-	c.server.MoveClientToRoom(c, "lobby")
-	if messages, ok := c.server.history["lobby"]; ok {
-		for _, msg := range messages {
-			c.send <- msg
-		}
-	}
-	c.send <- "You joined room lobby"
-	c.server.BroadcastToRoom("lobby", fmt.Sprintf("🔵 %s joined the room", c.username))
+	c.server.AddClient(c, "lobby")
 
 	for scanner.Scan() {
 		msg := scanner.Text()
 
 		if msg == "/users" {
-			c.send <- "Connected users: " + c.server.ListUsers()
+			c.send <- c.server.ListUsers()
 			continue
 		}
 
 		if msg == "/rooms" {
-			c.send <- "Active rooms: " + c.server.ListRooms()
+			c.send <- c.server.ListRooms()
+			continue
+		}
+
+		if strings.HasPrefix(msg, "/join ") {
+			room := strings.TrimSpace(strings.TrimPrefix(msg, "/join "))
+			c.server.MoveClient(c, room)
 			continue
 		}
 
 		if strings.HasPrefix(msg, "/msg ") {
 			parts := strings.SplitN(msg, " ", 3)
 			if len(parts) < 3 {
-				c.send <- "Usage: /msg username message"
 				continue
 			}
-			targetName := parts[1]
-			privateMsg := parts[2]
-			if !c.server.SendPrivate(targetName, fmt.Sprintf("[PM from %s] %s", c.username, privateMsg)) {
-				c.send <- "User not found: " + targetName
+			c.server.PrivateMessage(c.username, parts[1], parts[2])
+			continue
+		}
+
+		if strings.HasPrefix(msg, "/search ") {
+			keyword := strings.TrimSpace(strings.TrimPrefix(msg, "/search "))
+			results := c.server.Search(c.room, keyword)
+			for _, r := range results {
+				c.send <- r
 			}
 			continue
 		}
 
-		if strings.HasPrefix(msg, "/nick ") {
-			newName := strings.TrimSpace(strings.TrimPrefix(msg, "/nick "))
-			if newName == "" {
-				c.send <- "Usage: /nick newname"
+		if strings.HasPrefix(msg, "/edit ") {
+			parts := strings.SplitN(msg, " ", 3)
+			if len(parts) < 3 {
 				continue
 			}
-			oldName := c.username
-			c.username = newName
-			c.server.BroadcastToRoom(c.room, fmt.Sprintf("🔄 %s changed name to %s", oldName, newName))
+			id, _ := strconv.Atoi(parts[1])
+			c.server.EditMessage(c, id, parts[2])
 			continue
 		}
 
-		if strings.HasPrefix(msg, "/join ") {
-			newRoom := strings.TrimSpace(strings.TrimPrefix(msg, "/join "))
-			if newRoom == "" {
-				c.send <- "Usage: /join roomname"
-				continue
-			}
-			oldRoom := c.room
-			c.server.MoveClientToRoom(c, newRoom)
-			c.room = newRoom
-			if messages, ok := c.server.history[newRoom]; ok {
-				for _, m := range messages {
-					c.send <- m
-				}
-			}
-			c.send <- fmt.Sprintf("You joined room %s", newRoom)
-			c.server.BroadcastToRoom(oldRoom, fmt.Sprintf("🔴 %s left the room", c.username))
-			c.server.BroadcastToRoom(newRoom, fmt.Sprintf("🔵 %s joined the room", c.username))
+		if strings.HasPrefix(msg, "/delete ") {
+			id, _ := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(msg, "/delete ")))
+			c.server.DeleteMessage(c, id)
 			continue
 		}
 
-		formatted := fmt.Sprintf("[%s] %s", c.username, msg)
-		c.server.BroadcastToRoom(c.room, formatted)
+		c.server.Broadcast(c, msg)
 	}
 }
 
