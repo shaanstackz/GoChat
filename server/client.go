@@ -15,6 +15,7 @@ type Client struct {
 	send     chan string
 	server   *Server
 	username string
+	room     string
 }
 
 func NewClient(conn net.Conn, server *Server) *Client {
@@ -24,9 +25,10 @@ func NewClient(conn net.Conn, server *Server) *Client {
 
 	return &Client{
 		conn:     conn,
-		send: make(chan string, 20),
+		send:     make(chan string, 20),
 		server:   server,
 		username: strings.TrimSpace(name),
+		room:     "general",
 	}
 }
 
@@ -35,6 +37,36 @@ func (c *Client) Read() {
 
 	for scanner.Scan() {
 		msg := scanner.Text()
+
+		if strings.HasPrefix(msg, "/join ") {
+			newRoom := strings.TrimSpace(strings.TrimPrefix(msg, "/join "))
+			oldRoom := c.room
+
+			delete(c.server.rooms[oldRoom], c)
+			c.room = newRoom
+
+			if c.server.rooms[newRoom] == nil {
+				c.server.rooms[newRoom] = make(map[*Client]bool)
+			}
+			c.server.rooms[newRoom][c] = true
+
+			c.send <- "Joined room " + newRoom
+			continue
+		}
+
+		if msg == "/rooms" {
+			for room := range c.server.rooms {
+				c.send <- room
+			}
+			continue
+		}
+
+		if msg == "/who" {
+			for user := range c.server.rooms[c.room] {
+				c.send <- user.username
+			}
+			continue
+		}
 
 		if strings.HasPrefix(msg, "/sendfile ") {
 			filename := strings.TrimSpace(strings.TrimPrefix(msg, "/sendfile "))
@@ -49,7 +81,10 @@ func (c *Client) Read() {
 			io.ReadFull(c.conn, buf)
 
 			os.WriteFile("uploads/"+filename, buf, 0644)
-			c.server.broadcast <- "[SYSTEM] " + c.username + " uploaded " + filename
+			c.server.broadcast <- Message{
+				room: c.room,
+				text: "[SYSTEM] " + c.username + " uploaded " + filename,
+			}
 			continue
 		}
 
@@ -66,7 +101,10 @@ func (c *Client) Read() {
 			continue
 		}
 
-		c.server.broadcast <- "[" + c.username + "] " + msg
+		c.server.broadcast <- Message{
+			room: c.room,
+			text: "[" + c.username + "] " + msg,
+		}
 	}
 
 	c.server.unregister <- c

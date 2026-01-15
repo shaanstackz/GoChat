@@ -6,35 +6,55 @@ import (
 	"os"
 )
 
+type Message struct {
+	room string
+	text string
+}
+
 type Server struct {
 	clients    map[*Client]bool
+	rooms      map[string]map[*Client]bool
 	register   chan *Client
 	unregister chan *Client
-	broadcast  chan string
+	broadcast  chan Message
 }
 
 func NewServer() *Server {
 	return &Server{
 		clients:    make(map[*Client]bool),
+		rooms:      make(map[string]map[*Client]bool),
 		register:   make(chan *Client, 10),
 		unregister: make(chan *Client, 10),
-		broadcast:  make(chan string, 100),
+		broadcast:  make(chan Message, 100),
 	}
 }
 
 func (s *Server) Run() {
 	for {
 		select {
+
 		case c := <-s.register:
 			s.clients[c] = true
-			s.broadcast <- "[SYSTEM] " + c.username + " joined"
+			if s.rooms[c.room] == nil {
+				s.rooms[c.room] = make(map[*Client]bool)
+			}
+			s.rooms[c.room][c] = true
+			s.broadcast <- Message{
+				room: c.room,
+				text: "[SYSTEM] " + c.username + " joined " + c.room,
+			}
+
 		case c := <-s.unregister:
 			delete(s.clients, c)
+			delete(s.rooms[c.room], c)
 			close(c.send)
-			s.broadcast <- "[SYSTEM] " + c.username + " left"
+
 		case msg := <-s.broadcast:
-			for c := range s.clients {
-				c.send <- msg
+			for c := range s.rooms[msg.room] {
+				select {
+				case c.send <- msg.text:
+				default:
+				}
 			}
 		}
 	}
@@ -53,7 +73,7 @@ func main() {
 		conn, _ := ln.Accept()
 		client := NewClient(conn, server)
 		server.register <- client
-		go client.Read()
 		go client.Write()
+		go client.Read()
 	}
 }
