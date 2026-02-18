@@ -54,6 +54,28 @@ func (c *Client) Read() {
 			continue
 		}
 
+		if strings.HasPrefix(msg, "/dm ") {
+			parts := strings.SplitN(msg, " ", 3)
+			if len(parts) < 3 {
+				c.send <- "Usage: /dm <user> <message>"
+				continue
+			}
+
+			targetName := parts[1]
+			text := parts[2]
+
+			target, ok := c.server.users[targetName]
+			if !ok {
+				c.send <- "User not found"
+				continue
+			}
+
+			target.send <- "[DM from " + c.username + "] " + text
+			c.send <- "[DM to " + targetName + "] " + text
+			continue
+		}
+
+
 		if msg == "/rooms" {
 			for room := range c.server.rooms {
 				c.send <- room

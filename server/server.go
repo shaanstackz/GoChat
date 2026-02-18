@@ -13,15 +13,18 @@ type Message struct {
 
 type Server struct {
 	clients    map[*Client]bool
+	users      map[string]*Client
 	rooms      map[string]map[*Client]bool
 	register   chan *Client
 	unregister chan *Client
 	broadcast  chan Message
 }
 
+
 func NewServer() *Server {
 	return &Server{
 		clients:    make(map[*Client]bool),
+		users:      make(map[string]*Client),
 		rooms:      make(map[string]map[*Client]bool),
 		register:   make(chan *Client, 10),
 		unregister: make(chan *Client, 10),
@@ -35,10 +38,13 @@ func (s *Server) Run() {
 
 		case c := <-s.register:
 			s.clients[c] = true
+			s.users[c.username] = c
+
 			if s.rooms[c.room] == nil {
 				s.rooms[c.room] = make(map[*Client]bool)
 			}
 			s.rooms[c.room][c] = true
+
 			s.broadcast <- Message{
 				room: c.room,
 				text: "[SYSTEM] " + c.username + " joined " + c.room,
@@ -46,6 +52,7 @@ func (s *Server) Run() {
 
 		case c := <-s.unregister:
 			delete(s.clients, c)
+			delete(s.users, c.username)
 			delete(s.rooms[c.room], c)
 			close(c.send)
 
