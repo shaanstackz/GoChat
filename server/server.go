@@ -1,37 +1,66 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"net"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 type Message struct {
 	room string
+	user string
 	text string
 }
 
 type Server struct {
-	clients     map[*Client]bool
-	users       map[string]*Client
-	rooms       map[string]map[*Client]bool
-	roomHistory map[string][]string
-	dmHistory   map[string]map[string][]string
-	register    chan *Client
-	unregister  chan *Client
-	broadcast   chan Message
+	db         *sql.DB
+	clients    map[*Client]bool
+	users      map[string]*Client
+	rooms      map[string]map[*Client]bool
+	register   chan *Client
+	unregister chan *Client
+	broadcast  chan Message
 }
 
 func NewServer() *Server {
-	return &Server{
-		clients:     make(map[*Client]bool),
-		users:       make(map[string]*Client),
-		rooms:       make(map[string]map[*Client]bool),
-		roomHistory: make(map[string][]string),
-		dmHistory:   make(map[string]map[string][]string),
-		register:    make(chan *Client, 10),
-		unregister:  make(chan *Client, 10),
-		broadcast:   make(chan Message, 100),
+	db, err := sql.Open("sqlite3", "./chat.db")
+	if err != nil {
+		panic(err)
 	}
+
+	initDB(db)
+
+	return &Server{
+		db:         db,
+		clients:    make(map[*Client]bool),
+		users:      make(map[string]*Client),
+		rooms:      make(map[string]map[*Client]bool),
+		register:   make(chan *Client, 10),
+		unregister: make(chan *Client, 10),
+		broadcast:  make(chan Message, 100),
+	}
+}
+
+func initDB(db *sql.DB) {
+	db.Exec(`
+	CREATE TABLE IF NOT EXISTS room_messages (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		room TEXT,
+		user TEXT,
+		message TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`)
+
+	db.Exec(`
+	CREATE TABLE IF NOT EXISTS dm_messages (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		from_user TEXT,
+		to_user TEXT,
+		message TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`)
 }
 
 func (s *Server) Run() {
@@ -52,6 +81,8 @@ func (s *Server) Run() {
 				text: "[SYSTEM] " + c.username + " joined " + c.room,
 			}
 
+			s.sendRoomHistory(c)
+
 		case c := <-s.unregister:
 			delete(s.clients, c)
 			delete(s.users, c.username)
@@ -60,16 +91,13 @@ func (s *Server) Run() {
 
 		case msg := <-s.broadcast:
 
-			h := s.roomHistory[msg.room]
-			h = append(h, msg.text)
-			if len(h) > 50 {
-				h = h[len(h)-50:]
-			}
-			s.roomHistory[msg.room] = h
+			s.saveRoomMessage(msg.room, msg.user, msg.text)
+
+			formatted := "[" + msg.user + "] " + msg.text
 
 			for c := range s.rooms[msg.room] {
 				select {
-				case c.send <- msg.text:
+				case c.send <- formatted:
 				default:
 				}
 			}
@@ -77,30 +105,46 @@ func (s *Server) Run() {
 	}
 }
 
-func (s *Server) UsernameExists(name string) bool {
-	_, ok := s.users[name]
-	return ok
+func (s *Server) saveRoomMessage(room, user, text string) {
+	s.db.Exec(
+		"INSERT INTO room_messages(room, user, message) VALUES(?,?,?)",
+		room, user, text,
+	)
+}
+
+func (s *Server) saveDM(from, to, msg string) {
+	s.db.Exec(
+		"INSERT INTO dm_messages(from_user, to_user, message) VALUES(?,?,?)",
+		from, to, msg,
+	)
+}
+
+func (s *Server) sendRoomHistory(c *Client) {
+	rows, _ := s.db.Query(`
+		SELECT user, message
+		FROM room_messages
+		WHERE room=?
+		ORDER BY id DESC
+		LIMIT 20
+	`, c.room)
+
+	defer rows.Close()
+
+	var msgs []string
+
+	for rows.Next() {
+		var u, m string
+		rows.Scan(&u, &m)
+		msgs = append(msgs, "["+u+"] "+m)
+	}
+
+	for i := len(msgs) - 1; i >= 0; i-- {
+		c.send <- msgs[i]
+	}
 }
 
 func (s *Server) PrivateMessage(from, to, msg string) {
-	if s.dmHistory[from] == nil {
-		s.dmHistory[from] = make(map[string][]string)
-	}
-	if s.dmHistory[to] == nil {
-		s.dmHistory[to] = make(map[string][]string)
-	}
-
-	formatted := "[DM " + from + "→" + to + "] " + msg
-
-	s.dmHistory[from][to] = append(s.dmHistory[from][to], formatted)
-	s.dmHistory[to][from] = append(s.dmHistory[to][from], formatted)
-
-	if len(s.dmHistory[from][to]) > 30 {
-		s.dmHistory[from][to] = s.dmHistory[from][to][1:]
-	}
-	if len(s.dmHistory[to][from]) > 30 {
-		s.dmHistory[to][from] = s.dmHistory[to][from][1:]
-	}
+	s.saveDM(from, to, msg)
 
 	target, ok := s.users[to]
 	if !ok {
@@ -110,6 +154,11 @@ func (s *Server) PrivateMessage(from, to, msg string) {
 
 	target.send <- "[DM from " + from + "] " + msg
 	s.users[from].send <- "[DM to " + to + "] " + msg
+}
+
+func (s *Server) UsernameExists(name string) bool {
+	_, ok := s.users[name]
+	return ok
 }
 
 func main() {

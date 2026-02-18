@@ -37,7 +37,6 @@ func (c *Client) Read() {
 		if strings.HasPrefix(msg, "/nick ") {
 			newName := strings.TrimSpace(strings.TrimPrefix(msg, "/nick "))
 			if newName == "" {
-				c.send <- "Usage: /nick <newname>"
 				continue
 			}
 			if c.server.UsernameExists(newName) {
@@ -45,45 +44,18 @@ func (c *Client) Read() {
 				continue
 			}
 
-			old := c.username
-			delete(c.server.users, old)
+			delete(c.server.users, c.username)
 			c.username = newName
 			c.server.users[newName] = c
-
-			c.server.broadcast <- Message{
-				room: c.room,
-				text: "[SYSTEM] " + old + " is now known as " + newName,
-			}
 			continue
 		}
 
 		if strings.HasPrefix(msg, "/dm ") {
 			parts := strings.SplitN(msg, " ", 3)
 			if len(parts) < 3 {
-				c.send <- "Usage: /dm <user> <message>"
 				continue
 			}
 			c.server.PrivateMessage(c.username, parts[1], parts[2])
-			continue
-		}
-
-		if msg == "/history" {
-			for _, m := range c.server.roomHistory[c.room] {
-				c.send <- m
-			}
-			continue
-		}
-
-		if strings.HasPrefix(msg, "/history dm ") {
-			user := strings.TrimSpace(strings.TrimPrefix(msg, "/history dm "))
-			h := c.server.dmHistory[c.username][user]
-			if len(h) == 0 {
-				c.send <- "No DM history"
-				continue
-			}
-			for _, m := range h {
-				c.send <- m
-			}
 			continue
 		}
 
@@ -97,30 +69,15 @@ func (c *Client) Read() {
 			}
 			c.server.rooms[newRoom][c] = true
 
-			c.send <- "Joined room " + newRoom
-			for _, m := range c.server.roomHistory[newRoom] {
-				c.send <- m
-			}
-			continue
-		}
-
-		if msg == "/rooms" {
-			for r := range c.server.rooms {
-				c.send <- r
-			}
-			continue
-		}
-
-		if msg == "/who" {
-			for u := range c.server.rooms[c.room] {
-				c.send <- u.username
-			}
+			c.send <- "Joined " + newRoom
+			c.server.sendRoomHistory(c)
 			continue
 		}
 
 		c.server.broadcast <- Message{
 			room: c.room,
-			text: "[" + c.username + "] " + msg,
+			user: c.username,
+			text: msg,
 		}
 	}
 
